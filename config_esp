@@ -1,0 +1,775 @@
+#!/bin/sh
+
+ACTIONS_LIST="
+    # Automatically calls the function made by lowercasing the action and replacing blanks by _
+    # For example, action 'Show config' will call function 'show_config'
+    #
+    # Cardinality indicates how many ESPs can be passed to the function:
+    # - 0: no ESP needed
+    # - 1: only one ESP supported
+    # - n: will run the function on several ESPs
+    #
+    # action                    : cardinality (0|1|n) : description if any 
+    # --------------------------:---------------------:-------------------
+    Show config                 : n                   :   
+    Show GPIO config            : n                   : 
+    Upload config               : n                   :
+    Upload firmware             : n                   :
+    Enter command line          : 1                   :Communicates with the ESP
+    Display graph               : 0                   :Display topology 
+    Edit config file            : 0                   :
+    Quit                        : 0                   :
+"
+
+edit_config_file ()
+{
+    sensible-editor $CONFFILE
+    load_conf
+}
+
+wait_file ()
+{
+    local tmpfile=$1
+    local timeout=$2
+
+    local size=`wc -c < $tmpfile`
+    local oldsize="-1"
+    while [ "$size" != "$oldsize" ]
+    do
+        sleep $timeout
+        oldsize=$size
+        size=`wc -c < $tmpfile`
+    done
+}
+
+send_commands ()
+{
+    local interactive=false
+    if [ "$1" = -i ]
+    then
+        interactive=true
+        shift
+        echo "Entering in command line mode with ESP_$1. Type 'quit' to end the session..."
+    fi
+    # $1: esp
+    # $2: list of commands
+    local timeout=$3
+    [ -z $timeout ] && timeout=1
+
+    tmpfile=/tmp/resp.$$
+    > $tmpfile
+    mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | tee -a $tmpfile &
+    local procs=$!
+    (
+        if $interactive
+        then
+            local command=""
+            while read -p "CMD> " command && [ ! "$command" = "quit" ]
+            do
+                echo $command
+                wait_file $tmpfile 0.1
+            done
+        else
+            echo "$2" 
+        fi
+    ) | while read l
+    do 
+        l=$(echo $l) # suppress blanks
+        case "$l" in
+        "#"*|"") ;;
+        *)
+            $interactive || echo ">" $l
+            mosquitto_pub -t /WiFi/ESPRouter_$1/command $MQTT_CREDS -m "$l"
+            sleep 0.1
+            ;;
+        esac
+    done
+    if ! $interactive
+    then
+        wait_file $tmpfile $timeout
+    fi
+    kill $procs
+    rm -f $tmpfile
+}
+
+display_node ()
+{
+    local node=$1
+    local lead="$2"
+
+    local first_indent=""
+    local next_indent=""
+
+    local _node=`echo $node | sed 's/:/_/g'`
+
+    if [ -z "$lead" ]
+    then
+        # root node
+
+        local depts
+        eval "depts=\$dependents_$_node"
+
+        local first_son=`echo $depts | awk '{print $1}'`
+
+        if [ -z $ROOT_SSID ]
+        then
+            ROOT_SSID="<unknown>" # not local!
+            if [ ! -z $first_son ]
+            then
+                local _first_son=`echo $first_son | sed 's/:/_/g'`
+                ROOT_SSID=`show_config $(eval "echo \\\$id_of_$_first_son") | awk -F'[ :]' '/STA: SSID:/ { print $4}'`
+            fi
+        fi
+        echo SSID: $ROOT_SSID
+        echo $node
+
+    else
+        local indent="`echo \"$lead\" | awk '{ if (length($0)>0) print substr($0, 1, length($0)-1)}'`"
+        first_indent="$indent+--"
+        next_indent="$indent   "
+
+
+        local _node=`echo $node | sed 's/:/_/g'`
+        local id
+        eval "id=\$id_of_$_node"
+
+        local rssi=$(eval "echo \$rssi_$id")
+
+        (
+            echo ESP_$id: `get_description $id` 
+            echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id` 
+            get_field version $id
+            local uptime="`get_field system_uptime $id | awk -F: '{
+                    days=int($1/24)
+                    h=$1-days*24
+                    d=\"\"
+                    if (days>0) d=days\"d \"
+                    printf \"%s%02d:%s:%s\n\", d, h, $2, $3
+                }'`"
+            echo Uptime: $uptime, `get_field stats_in $id`, `get_field stats_out $id`
+            echo Signal strength: $((2 * (rssi + 100)))% "($rssi dBm)", Free mem: `get_field free_mem $id`, Power supply: `get_field power_supply $id`V, Clock: `get_field clock_speed $id` MHz
+            local n=`get_field no_stas $id`
+            [ $n -eq 0 ] && echo "No station connected" 
+            [ $n -eq 1 ] && echo "$n station connected" 
+            [ $n -gt 1 ] && echo "$n stations connected"
+         ) | awk '
+            NR==1 { print "'"$first_indent"'"$0}
+            NR>1  { print "'"$next_indent"'"$0}
+        '
+    fi
+}
+
+compute_sublead ()
+{
+    local lead="$1"
+    local nb_sons_left=$2
+
+    echo "$lead/$nb_sons_left" | awk -F/ '{
+        lead=$1
+        nb_sons_left=$2
+
+        indent=""
+        if (length(lead)>0) {
+            indent=substr(lead, 1, length(lead)-1)
+            indent=indent"   "
+        }
+        
+        sublead=""
+        for (i=1; i<= nb_sons_left; i++) sublead=sublead"|"
+
+        print indent""sublead
+    }'
+}
+
+display_sub_graph ()
+{
+    local node=$1
+    local lead="$2"
+    local depts
+    depts=`get_field dependents $node`
+
+    display_node $node "$lead"
+    local nb_sons=`echo $depts | wc -w`
+    local n
+    local nb_sons_left=$nb_sons
+    for n in `echo $depts | awk '{for (i=0; i<NF; i++) print $(NF-i)}'`
+    do
+        sublead="`compute_sublead \"$lead\" $nb_sons_left`"
+        #echo "lead='$lead' nb_sons=$nb_sons sublead='$sublead'"
+        echo "$sublead"
+        display_sub_graph $n "$sublead"
+        nb_sons_left=$((nb_sons_left-1))
+    done
+}
+
+display_graph ()
+{
+    local line
+    local nodes=""
+    local macs=""
+    exec 3<&0
+    trap "kill %%" INT
+    set -m
+    mosquitto_sub -v -t "/WiFi/+/system/Topology" $MQTT_CREDS | while read line
+    do
+        local scrfile=/tmp/scr.$$
+        {
+            clear
+            local errs=/tmp/gd.err.$$
+            local _esp_cmds
+            _esp_cmds=`echo $line | awk 'BEGIN { 
+                FS="\":\"?"
+                RS="\"?[],{}\n]+\"?"
+            }
+            /Topology/ { next }
+            $1 == "nodeinfo" { next }
+            $1 == "id" { gsub("ESP_", "", $2); id=$2; print "id="$2; next }
+            $1 == "sta_mac" { print "mac="$2; m=$2; gsub(":", "_", m); print "id_of_"m"="id }
+            $1 == "ap_mac" { print "ap_mac="$2; m=$2; gsub(":", "_", m); print "id_of_"m"="id }
+            $1 == "uplink_bssid" { print "uplink="$2 }
+            $1 == "ap_mac" \
+                || $1 == "sta_mac" \
+                || $1 == "ap_ip" \
+                || $1 == "sta_ip" \
+                || $1 == "rssi" \
+                || $1 == "mesh_level" \
+                || $1 == "no_stas" \
+                || $1 == "uplink_bssid" \
+                { print $1"_"id"="$2; next }
+            $1 == "stas" { next }
+            $1 == "mac" { stations_mac=(stations_mac=="")?$2:stations_mac" "$2; next }
+            $1 == "ip" { stations_ip=(stations_ip=="")?$2:stations_ip" "$2; next }
+            {
+                print "Unsupported field \"" $1 "\" with value \"" $2 "\""> "/dev/stderr"
+            }
+            END {
+                print "stations_mac=\""stations_mac"\""
+                print "stations_ip=\""stations_ip"\""
+            }'` 2>$errs
+            #clear
+            eval "$_esp_cmds"
+            local id_of_up=`get_field id_of $uplink`
+            local up_sta=`get_field sta_mac $id_of_up`
+            [ -z $id_of_up ] && up_sta=$uplink 
+            depts=`get_field dependents $up_sta`
+            if [ -z "`echo $depts | grep $mac`" ]
+            then 
+                set_field dependents $up_sta "$mac `get_field dependents $up_sta`"
+            fi
+            set_field uplink $mac $up_sta
+            # build list of ESPs
+            if [ -z "`echo $nodes | grep $id`" ]; then nodes="$id $nodes"; fi
+            # build list of MACs
+            local m
+            for m in $mac $up_sta
+            do
+                if [ -z "`echo $macs | grep $m`" ]; then macs="$m $macs"; fi
+            done
+            # build list of known roots
+            local roots=""
+            for m in $macs
+            do
+                _up=`get_field id_of $m`
+                if [ -z $_up ]
+                then
+                    if [ -z "`echo $roots | grep $m`" ]; then roots="$m $roots"; fi
+                fi
+            done
+
+            # find out additional information
+            more_commands=`send_commands $id "
+                    show config
+                    show stats
+                " | awk '
+                BEGIN {id="'$id'"}
+                {
+                    gsub(/[\n\r]/,"",$0); 
+                }
+                /^>/ { next }
+                $0=="" { next }
+                /Stations? connected/ { next }
+                /^STA: SSID:/ { next }
+                /^BSSID: / { next }
+                /^STA MAC: / { next }
+                /^STA IP: / { next }
+                /^STA RSSI: / { next }
+                /^AP MAC: / { next }
+                /^STA hostname: / { next }
+                /^Phy mode: / { next }
+                /^MQTT: / { next }
+                /^Station: / { next }
+                /^Network console access / { next }
+                /^Automesh: / { next }
+
+                /^Version/ { printf "version_%s=\"%s\"\n", id, $0 ; next}
+                /^System uptime:/ { printf "system_uptime_%s=%s\n", id, $3 ; next}
+                /^Power supply:/ { printf "power_supply_%s=%s\n", id, $3 ; next}
+                /^Free mem:/ { printf "free_mem_%s=%s\n", id, $3 ; next}
+                /^Clock speed:/ { printf "clock_speed_%s=%s\n", id, $3 ; next}
+                /^AP:  SSID:/ { split($0, t, /[ :]/); printf "ap_ssid_%s=%s\n", id, t[5] ; next}
+                / KiB in / { printf "stats_in_%s=\"%s\"\n", id, $0 ; next}
+                / KiB out / { printf "stats_out_%s=\"%s\"\n", id, $0 ; next}
+                
+                { printf "Unhandled line \"%s\"\n", $0 >"/dev/stderr"}' 2>>$errs`
+            eval "$more_commands"
+
+            false && ( echo "$_esp_cmds"; echo "$more_commands"; echo )
+            #echo $nodes
+            #echo $macs
+            #echo roots=$roots
+            for r in $roots
+            do
+                display_sub_graph $r ""
+            done
+
+            cat $errs
+            rm -rf $errs
+         } > $scrfile 2>&1
+        cat $scrfile
+        rm -rf $scrfile
+        echo -n 'Press a key to stop...'
+    done &
+    bash -c "read -rsn 1 -p 'Discovering topology, press a key to stop...' key" <&3 > /dev/null
+    echo
+    set +m # disable the [1] Terminated message when killing the background process
+    kill %%
+    exec 3<&-
+}
+
+normalize_mac ()
+{
+    echo $1 | tr '[:upper:]:' '[:lower:]_'
+}
+
+get_field ()
+{
+    local field=$1
+    local id=`normalize_mac $2`
+
+    eval "echo \$${field}_$id"
+}
+
+set_field ()
+{
+    local field=$1
+    local id=`normalize_mac $2`
+    local value="$3"
+
+    eval "${field}_$id=\"$value\""
+}
+
+get_config ()
+{
+    # $1: esp
+
+    eval 'echo "$config_'$1'"'
+}
+
+get_commands ()
+{
+    # $1: esp
+  
+    get_config $1 | awk 'NR>1'
+}
+
+get_description ()
+{
+    # $1: esp
+  
+    get_config $1 | awk 'NR==1'
+}
+
+get_ESPs ()
+{
+    set | grep -E '^config_' | cut -d= -f1 | awk -F_ '{ print $NF}' | sort
+    
+}
+
+read_input ()
+{
+    # $1: message
+    # $2: supported answers (expr a la case)
+    # $3: supported answers (text, if different from previous)
+    # $4: default answer
+
+    _ok=false
+    until $_ok
+    do
+        echo -n $1
+        if [ -z $3 ]
+        then 
+            if [ ! -z $2 ] 
+            then
+                echo -n " ($2)" 
+            fi
+        else 
+            echo -n " ($3)"
+        fi
+        if [ ! -z $4 ]
+        then
+            echo -n " [$4]"
+        fi
+        echo -n ": "
+        read ANSWER
+        [ -z $ANSWER ] && ANSWER=$4
+        _ans=`echo $ANSWER | sed s!"'"!"'\"'\"'"!g`
+        eval "case '$_ans' in $2) _ok=true;; *) _ok=false;; esac"
+    done
+}
+
+select_ESPs ()
+{
+    local _ESP_all=""
+    local _i=0
+    local _supported=""
+    local esp
+    echo 'Select an ESP:'
+    for esp in `get_ESPs`
+    do
+        echo "$((_i=_i+1)))" ESP_$esp - `get_description $esp`
+        _supported="$_supported|$_i"
+        eval _ESP_$_i=$esp
+        eval _ESP_all=\"$_ESP_all $esp\"
+    done
+    if [ $_i -gt 0 ]
+    then
+        [ "$1" = "-all" ] && echo 'all)' All ESPs
+        _supported=`echo $_supported | cut -c2-`
+        local alloption=""
+        [ "$1" = "-all" ] && alloption="|all"
+        read_input "Enter ESP number" "$_supported$alloption" "1-$_i$alloption" ""
+        eval ESPs=\$_ESP_$ANSWER
+
+        for esp in $ESPs
+        do
+            echo "=> " ESP_$esp - `get_description $esp`
+        done
+        echo
+    else 
+        echo Sorry, no known ESP...
+    fi
+}
+
+execute_action ()
+{
+    local c=`get_action_cardinality $ACTION`
+    case $c in 
+    "n")
+        select_ESPs -all
+        ;;
+    1)
+        select_ESPs
+        ;;
+    0)
+        ;;
+    esac
+
+    if [ ! -z "$ESPs" ]
+    then
+        for esp in $ESPs
+        do
+            msg="ESP_$esp - `get_description $esp`"
+            echo $msg
+            echo $msg | awk '{for (i=0; i<length($0); i++) printf("-"); printf("\n")}'
+            $ACTION $esp
+            echo
+        done
+        echo
+    else
+        $ACTION
+    fi
+}
+
+quit ()
+{
+    exit 0
+}
+
+get_actions ()
+{
+    #select_action < /dev/null | grep -v "Enter action" | awk 'NR>1' | sed -e "s!^[0-9]*) !!g" -e "s! !_!g" | tr [:upper:] [:lower:]
+    get_actions_list | awk -F: '{ print $1 }' | tr '[:upper:] ' '[:lower:]_'
+}
+
+get_action_cardinality ()
+{
+    get_actions_list | tr '[:upper:] ' '[:lower:]_' | awk -F: '$1=="'"$1"'" { print $2}'
+}
+
+usage ()
+{
+    echo "Usage: `basename $0` [<action> [ESP]]" >&2
+    echo "Supported ESPs:" >&2
+    for esp in `get_ESPs`
+    do
+        echo - $esp: `get_description $esp`
+    done
+    echo - all: all above
+    echo "Supported actions:" 
+    get_actions | awk '$0 != "quit" {print "- "$0}' >&2
+}
+
+
+# available commands below
+##########################
+
+upload_config () 
+{
+    # $1: esp
+
+    send_commands $1 "
+        $(get_commands $1)
+        save
+    "
+}
+
+show_config () 
+{
+    # $1: esp
+
+    send_commands $1 "show config"
+}
+
+show_gpio_config () 
+{
+    # $1: esp
+
+    send_commands $1 "show gpio"
+}
+
+upload_firmware () 
+{
+    # $1: esp
+
+    cd ~/esp_wifi_repeater/firmware
+    python -m SimpleHTTPServer 8080 &
+    local proc=$!
+    sleep 1
+    send_commands $1 "
+        set ota_host `hostname -I | awk '{print $1}'`
+        set ota_port 8080
+        ota update
+    " 1
+    kill $proc
+    sleep 10
+    send_commands $1 "show config"
+}
+
+enter_command_line ()
+{
+    send_commands -i $1
+}
+
+get_actions_list ()
+{
+    echo "$ACTIONS_LIST" | grep -v -E "^[ \t]*#" | grep -v -E "^[ \t]*$" | sed -e 's/^ *//g' -e 's/ *: */:/g'
+}
+
+select_action ()
+{
+
+    local _i=0
+
+    echo "What action?"
+    get_actions_list | awk -F" *: *" '
+    BEGIN {
+        i=0
+    }
+    {
+        action[i]=$1
+        cardinality[i]=$2
+        description[i]=$3
+        i++
+    }
+    END {
+        for(j=0;j<i;j++) {
+            printf "%d) %s\n", j+1, action[j]
+        }
+    }'
+
+    _i=`get_actions_list | wc -l`
+
+    if [ $_i -gt 0 ]
+    then
+        read_input "Enter action" "[1-$_i]" "1-$((_i))" "1"
+        local command
+        command=`get_actions_list | awk -F: 'NR=='$ANSWER' { print $1}'`
+        ACTION=`echo $command | tr '[:upper:] ' '[:lower:]_'`
+    fi
+}
+
+check_conf ()
+{
+    CONFFILE=~/.config_esp.conf
+
+    # conf file should exist
+    if [ ! -r $CONFFILE ]
+    then
+        cat > $CONFFILE <<EOF
+D0=16
+D1=5
+D2=4
+D3=0
+D4=2
+D5=14
+D6=12
+D7=13
+D8=15
+
+# Define here the MQTT connection details
+# It must correspond to the mqtt_host, mqtt_user and mqtt_password set on your ESPs
+MQTT_HOST=
+MQTT_USER=
+MQTT_PASSWORD=
+EOF
+        chmod u=rw,og= $CONFFILE
+    fi
+
+    # mosquitto should be installed
+    if [ -z `which mosquitto_sub` ]
+    then
+        echo 'Cannot find mosquitto_sub. Please install...' >&2
+        exit 1
+    fi
+
+    # check we can connect to mosquitto
+    ANSWER=y
+    while [ $ANSWER = y ]
+    do
+        load_conf
+
+        local out=/tmp/out.$$
+        mosquitto_sub -v $MQTT_CREDS -t "/#" > $out 2>&1 &
+        sleep 0.1
+        if [ ! -s $out ]
+        then
+            # wait if we didn't get anything yet
+            sleep 1
+        fi
+        kill $! 2> /dev/null
+        if ! grep -q -E "^/WiFi" $out 
+        then
+            echo Cannot connect to mosquitto server: >&2
+            echo \$ mosquitto_sub -v $MQTT_CREDS -t "/#" >&2
+            cat $out >&2
+            rm -f $out
+
+            read_input 'Do you want to check the configuration file?' 'y|Y|n|N' 'y|n' y
+            [ $ANSWER = y ] && sensible-editor $CONFFILE || exit 1
+            load_conf
+        fi
+        ANSWER=n
+        rm -f $out
+    done
+
+    # check we have configuration for all ESPs
+    local out=/tmp/out.$$
+    mosquitto_sub -v $MQTT_CREDS -t "/#" > $out 2>&1 &
+    sleep 0.1
+    if [ ! -s $out ]
+    then
+        # wait if we didn't get anything yet
+        sleep 1
+    fi
+    kill $! 2> /dev/null
+    local esps
+    esps=`grep -E "^/WiFi/.*/status (on|off)line$" $out | awk -F"[/_]" '{print $4}'`
+    rm -f $out
+    local known_esps
+    known_esps=`get_ESPs`
+    local new_conf=""
+    local added_esps=""
+    for e in $esps
+    do
+        if [  -z "`echo $known_esps | grep $e`" ]
+        then
+            # ESP e is not known, let's add an initial config for it
+            added_esps="$added_esps ESP_$e"
+            new_conf=`cat <<EOF
+config_$e="Description of ESP_$e\n
+    # configuration of ESP_$e\n
+    # set gpio \\$D1 mode out\n
+"
+EOF
+            `"\n\n"$new_conf
+        fi
+    done
+    if [ ! -z "$new_conf" ]
+    then
+        # sed hacks below found on https://unix.stackexchange.com/questions/26284/how-can-i-use-sed-to-replace-a-multi-line-string
+        new_conf=`echo $new_conf | sed -e '1h;2,$H;$!d;g' -re 's/\n/\\\n/g'`
+        sed -i.old -e '1h;2,$H;$!d;g' -re "s/(\n *\n(.*[^ ].*\n)*MQTT_)/\n\n$new_conf\\1/g" $CONFFILE
+        echo "A new default configuration has been added for$added_esps."
+        read_input 'Do you want to edit the configuration file' 'y|Y|n|N' 'y|n' y
+        [ $ANSWER = y ] && sensible-editor $CONFFILE
+        load_conf
+    fi
+}
+
+load_conf ()
+{
+    # clear expected variables
+    MQTT_HOST=""
+    MQTT_USER=""
+    MQTT_PASSWORD=""
+    eval `set | grep -E '^config_[0-9a-f]+=' | awk -F= '{ print "unset "$1}'`
+ 
+    . $CONFFILE
+
+    MQTT_CREDS=""
+    [ ! -z $MQTT_HOST ] && MQTT_CREDS="$MQTT_CREDS -h $MQTT_HOST"
+    [ ! -z $MQTT_USER ] && MQTT_CREDS="$MQTT_CREDS -u $MQTT_USER"
+    [ ! -z $MQTT_PASSWORD ] && MQTT_CREDS="$MQTT_CREDS -P $MQTT_PASSWORD"
+}
+
+
+if [ "$1" = "-h" ]
+then
+    usage
+    exit 2
+fi
+
+check_conf
+
+if [ "$1" = "-display_graph" ]
+then
+    display_graph
+    exit 0
+fi
+
+ACTION=""
+if [ $# = 2 ]
+then
+    ESPs=$1
+    ACTION=$2
+fi
+
+if [ $# = 1 ]
+then
+    ESPs=`get_ESPs`
+    ACTION=$1
+fi
+
+if [ ! -z $ACTION ]
+then
+    if [ -z `get_actions | grep "$ACTION"` ]
+    then
+        usage
+        exit 2
+    fi
+fi
+
+if [ $# = 0 ]
+then
+    while true
+    do
+        ESPs=""
+        select_action
+        execute_action
+    done
+else
+    execute_action
+fi
+
+
+
