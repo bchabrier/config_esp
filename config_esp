@@ -21,6 +21,11 @@ ACTIONS_LIST="
     Quit                        : 0                   :
 "
 
+random ()
+{
+    bash -c 'echo $RANDOM'
+}
+
 edit_config_file ()
 {
     sensible-editor $CONFFILE
@@ -56,10 +61,15 @@ send_commands ()
     local timeout=$3
     [ -z $timeout ] && timeout=1
 
-    tmpfile=/tmp/resp.$$
+    tmpfile=/tmp/resp.$$.`random`
     > $tmpfile
-    mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | tee -a $tmpfile &
-    local procs=$!
+    local procs=/tmp/killid.$$.`random`
+    > $procs
+    { 
+        mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS &
+        echo $! >> $procs
+        wait
+    } | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | tee -a $tmpfile &
     (
         if $interactive
         then
@@ -88,7 +98,8 @@ send_commands ()
     then
         wait_file $tmpfile $timeout
     fi
-    kill $procs
+    [ -s $procs ] && kill `cat $procs`
+    rm -f $procs
     rm -f $tmpfile
 }
 
@@ -96,6 +107,7 @@ display_node ()
 {
     local node=$1
     local lead="$2"
+    local format="$3"
 
     local first_indent=""
     local next_indent=""
@@ -137,21 +149,28 @@ display_node ()
 
         (
             echo ESP_$id: `get_description $id` 
-            echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id` 
-            get_field version $id
-            local uptime="`get_field system_uptime $id | awk -F: '{
-                    days=int($1/24)
-                    h=$1-days*24
-                    d=\"\"
-                    if (days>0) d=days\"d \"
-                    printf \"%s%02d:%s:%s\n\", d, h, $2, $3
-                }'`"
-            echo Uptime: $uptime, `get_field stats_in $id`, `get_field stats_out $id`
-            echo Signal strength: $((2 * (rssi + 100)))% "($rssi dBm)", Free mem: `get_field free_mem $id`, Power supply: `get_field power_supply $id`V, Clock: `get_field clock_speed $id` MHz
-            local n=`get_field no_stas $id`
-            [ $n -eq 0 ] && echo "No station connected" 
-            [ $n -eq 1 ] && echo "$n station connected" 
-            [ $n -gt 1 ] && echo "$n stations connected"
+            case "$format" in 
+            'g')
+                get_field gpios $id
+                ;;
+            'f'|*)
+                echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id` 
+                get_field version $id; echo
+                local uptime="`get_field system_uptime $id | awk -F: '{
+                        days=int($1/24)
+                        h=$1-days*24
+                        d=\"\"
+                        if (days>0) d=days\"d \"
+                        printf \"%s%02d:%s:%s\n\", d, h, $2, $3
+                    }'`"
+                echo Uptime: $uptime, `get_field stats_in $id`, `get_field stats_out $id`
+                echo Signal strength: $((2 * (rssi + 100)))% "($rssi dBm)", Free mem: `get_field free_mem $id`, Power supply: `get_field power_supply $id`V, Clock: `get_field clock_speed $id` MHz
+                local n=`get_field no_stas $id`
+                [ $n -eq 0 ] && echo "No station connected" 
+                [ $n -eq 1 ] && echo "$n station connected" 
+                [ $n -gt 1 ] && echo "$n stations connected"
+                ;;
+            esac
          ) | awk '
             NR==1 { print "'"$first_indent"'"$0}
             NR>1  { print "'"$next_indent"'"$0}
@@ -185,10 +204,11 @@ display_sub_graph ()
 {
     local node=$1
     local lead="$2"
+    local format="$3"
     local depts
     depts=`get_field dependents $node`
 
-    display_node $node "$lead"
+    display_node $node "$lead" "$format"
     local nb_sons=`echo $depts | wc -w`
     local n
     local nb_sons_left=$nb_sons
@@ -197,7 +217,7 @@ display_sub_graph ()
         sublead="`compute_sublead \"$lead\" $nb_sons_left`"
         #echo "lead='$lead' nb_sons=$nb_sons sublead='$sublead'"
         echo "$sublead"
-        display_sub_graph $n "$sublead"
+        display_sub_graph $n "$sublead" "$format"
         nb_sons_left=$((nb_sons_left-1))
     done
 }
@@ -207,50 +227,51 @@ display_graph ()
     local line
     local nodes=""
     local macs=""
+    local keys_file=/tmp/keys.$$.`random`
+    > $keys_file
+    local format_file=/tmp/format.$$.`random`
+    > $format_file
+    local changes_file=/tmp/changes.$$.`random`
+    > $changes_file
+    local kill_file=/tmp/kill.$$.`random`
+    > $kill_file
+    local errs=/tmp/gd.err.$$.`random`
+    > $errs
+
+    local killprocs=""
     exec 3<&0
-    trap "kill %%" INT
+    trap '[ -s $kill_file ] && kill `cat $kill_file` && exit' INT
     set -m
-    mosquitto_sub -v -t "/WiFi/+/system/Topology" $MQTT_CREDS | while read line
+
+    # start reading topology info and publishing changes in background
+    { 
+        mosquitto_sub -v -t "/WiFi/+/system/Topology" $MQTT_CREDS &
+        echo $! >> $kill_file
+        wait
+    } | while read line
     do
-        local scrfile=/tmp/scr.$$
-        {
-            clear
-            local errs=/tmp/gd.err.$$
-            local _esp_cmds
-            _esp_cmds=`echo $line | awk 'BEGIN { 
-                FS="\":\"?"
-                RS="\"?[],{}\n]+\"?"
-            }
-            /Topology/ { next }
-            $1 == "nodeinfo" { next }
-            $1 == "id" { gsub("ESP_", "", $2); id=$2; print "id="$2; next }
-            $1 == "sta_mac" { print "mac="$2; m=$2; gsub(":", "_", m); print "id_of_"m"="id }
-            $1 == "ap_mac" { print "ap_mac="$2; m=$2; gsub(":", "_", m); print "id_of_"m"="id }
-            $1 == "uplink_bssid" { print "uplink="$2 }
-            $1 == "ap_mac" \
-                || $1 == "sta_mac" \
-                || $1 == "ap_ip" \
-                || $1 == "sta_ip" \
-                || $1 == "rssi" \
-                || $1 == "mesh_level" \
-                || $1 == "no_stas" \
-                || $1 == "uplink_bssid" \
-                { print $1"_"id"="$2; next }
-            $1 == "stas" { next }
-            $1 == "mac" { stations_mac=(stations_mac=="")?$2:stations_mac" "$2; next }
-            $1 == "ip" { stations_ip=(stations_ip=="")?$2:stations_ip" "$2; next }
-            {
-                print "Unsupported field \"" $1 "\" with value \"" $2 "\""> "/dev/stderr"
-            }
-            END {
-                print "stations_mac=\""stations_mac"\""
-                print "stations_ip=\""stations_ip"\""
-            }'` 2>$errs
-            #clear
-            eval "$_esp_cmds"
+        collect_node_info "$line" | tr '\n' ';' >> $changes_file 2>> $errs
+        echo >> $changes_file
+    done &
+
+    # start listening to changes and display accordingly
+    local changes
+    {
+        tail -f $changes_file &
+        echo $! >> $kill_file
+        wait
+    } | while read changes
+    do
+        if [ ! -z "$changes" ]
+        then
+            # apply changes if any
+            false && echo "$changes" 
+            eval "$changes"
+
             local id_of_up=`get_field id_of $uplink`
             local up_sta=`get_field sta_mac $id_of_up`
             [ -z $id_of_up ] && up_sta=$uplink 
+            local depts
             depts=`get_field dependents $up_sta`
             if [ -z "`echo $depts | grep $mac`" ]
             then 
@@ -265,6 +286,17 @@ display_graph ()
             do
                 if [ -z "`echo $macs | grep $m`" ]; then macs="$m $macs"; fi
             done
+
+        fi
+
+        # draw in a file to display as quickly as possible
+        local scrfile=/tmp/scr.$$.`random`
+        {
+            clear
+            #echo $nodes
+            #echo $macs
+            #echo roots=$roots
+
             # build list of known roots
             local roots=""
             for m in $macs
@@ -276,64 +308,148 @@ display_graph ()
                 fi
             done
 
-            # find out additional information
-            more_commands=`send_commands $id "
-                    show config
-                    show stats
-                " | awk '
-                BEGIN {id="'$id'"}
-                {
-                    gsub(/[\n\r]/,"",$0); 
-                }
-                /^>/ { next }
-                $0=="" { next }
-                /Stations? connected/ { next }
-                /^STA: SSID:/ { next }
-                /^BSSID: / { next }
-                /^STA MAC: / { next }
-                /^STA IP: / { next }
-                /^STA RSSI: / { next }
-                /^AP MAC: / { next }
-                /^STA hostname: / { next }
-                /^Phy mode: / { next }
-                /^MQTT: / { next }
-                /^Station: / { next }
-                /^Network console access / { next }
-                /^Automesh: / { next }
-
-                /^Version/ { printf "version_%s=\"%s\"\n", id, $0 ; next}
-                /^System uptime:/ { printf "system_uptime_%s=%s\n", id, $3 ; next}
-                /^Power supply:/ { printf "power_supply_%s=%s\n", id, $3 ; next}
-                /^Free mem:/ { printf "free_mem_%s=%s\n", id, $3 ; next}
-                /^Clock speed:/ { printf "clock_speed_%s=%s\n", id, $3 ; next}
-                /^AP:  SSID:/ { split($0, t, /[ :]/); printf "ap_ssid_%s=%s\n", id, t[5] ; next}
-                / KiB in / { printf "stats_in_%s=\"%s\"\n", id, $0 ; next}
-                / KiB out / { printf "stats_out_%s=\"%s\"\n", id, $0 ; next}
-                
-                { printf "Unhandled line \"%s\"\n", $0 >"/dev/stderr"}' 2>>$errs`
-            eval "$more_commands"
-
-            false && ( echo "$_esp_cmds"; echo "$more_commands"; echo )
-            #echo $nodes
-            #echo $macs
-            #echo roots=$roots
             for r in $roots
             do
-                display_sub_graph $r ""
+                display_sub_graph $r "" "`tail -1 $format_file`"
             done
 
-            cat $errs
-            rm -rf $errs
-         } > $scrfile 2>&1
-        cat $scrfile
-        rm -rf $scrfile
-        echo -n 'Press a key to stop...'
+            mv $errs $errs.done
+            >> $errs
+            cat $errs.done
+            rm -f $errs.done
+        } > $scrfile 2>&1
+        [ "`cat $keys_file`" != 'q' ] && cat $scrfile
+        rm -f $scrfile
+        echo
+        echo -n 'Choose format: full|gpios or quit (f|g|q): '
     done &
-    bash -c "read -rsn 1 -p 'Discovering topology, press a key to stop...' key" <&3 > /dev/null
+
+    # read stdin for key pressed
+    bash -c 'read -rsn 1 -p "Discovering topology, press '"'q'"' to quit..." key; echo $key' <&3 >$keys_file
+    local key=`cat $keys_file`
+    while [ "$key" != 'q' ]
+    do  
+        echo $key >> $format_file
+        # provoque a refresh
+        echo >> $changes_file
+        bash -c 'read -rsn 1 key; echo $key' <&3 >$keys_file
+        key=`cat $keys_file`
+    done
     echo
     set +m # disable the [1] Terminated message when killing the background process
-    kill %%
+    [ -s $kill_file ] && kill `cat $kill_file`
     exec 3<&-
+    rm -f $keys_file
+    rm -f $format_file
+    rm -f $changes_file
+    rm -f $kill_file
+}
+
+collect_node_info ()
+{
+    local line="$1"
+
+    echo $line | awk 'BEGIN { 
+        FS="\":\"?"
+        RS="\"?[],{}\n]+\"?"
+    }
+    /Topology/ { next }
+    $1 == "nodeinfo" { next }
+    $1 == "id" { gsub("ESP_", "", $2); id=$2; print "id="$2; next }
+    $1 == "sta_mac" { print "mac="$2; m=$2; gsub(":", "_", m); print "id_of_"m"="id }
+    $1 == "ap_mac" { print "ap_mac="$2; m=$2; gsub(":", "_", m); print "id_of_"m"="id }
+    $1 == "uplink_bssid" { print "uplink="$2 }
+    $1 == "ap_mac" \
+        || $1 == "sta_mac" \
+        || $1 == "ap_ip" \
+        || $1 == "sta_ip" \
+        || $1 == "rssi" \
+        || $1 == "mesh_level" \
+        || $1 == "no_stas" \
+        || $1 == "uplink_bssid" \
+        { print $1"_"id"="$2; next }
+    $1 == "stas" { next }
+    $1 == "mac" { stations_mac=(stations_mac=="")?$2:stations_mac" "$2; next }
+    $1 == "ip" { stations_ip=(stations_ip=="")?$2:stations_ip" "$2; next }
+    {
+        print "Unsupported field \"" $1 "\" with value \"" $2 "\""> "/dev/stderr"
+    }
+    END {
+        print "stations_mac=\""stations_mac"\""
+        print "stations_ip=\""stations_ip"\""
+    }' 2>>$errs
+
+    local id
+    id=`echo $line | awk 'BEGIN { 
+        FS="\":\"?"
+        RS="\"?[],{}\n]+\"?"
+    }
+    $1 == "id" { gsub("ESP_", "", $2); print $2; exit }
+    END {
+    }' 2>/dev/null`
+
+    # find out additional information
+    send_commands "$id" "
+            show config
+            show stats
+            show gpio
+        " | awk '
+        BEGIN {
+            id="'$id'"
+            printf "gpios_%s=\"\"\n", id 
+        }
+        {
+            gsub(/[\n\r]/,"",$0); 
+        }
+        /^>/ { next }
+        $0=="" { next }
+        /Stations? connected/ { next }
+        /^STA: SSID:/ { next }
+        /^BSSID: / { next }
+        /^STA MAC: / { next }
+        /^STA IP: / { next }
+        /^STA RSSI: / { next }
+        /^AP MAC: / { next }
+        /^STA hostname: / { next }
+        /^Phy mode: / { next }
+        /^MQTT: / { next }
+        /^Station: / { next }
+        /^Network console access / { next }
+        /^Automesh: / { next }
+
+        /^Version/ { printf "version_%s=\"%s\"\n", id, $0 ; next}
+        /^System uptime:/ { printf "system_uptime_%s=%s\n", id, $3 ; next}
+        /^Power supply:/ { printf "power_supply_%s=%s\n", id, $3 ; next}
+        /^Free mem:/ { printf "free_mem_%s=%s\n", id, $3 ; next}
+        /^Clock speed:/ { printf "clock_speed_%s=%s\n", id, $3 ; next}
+        /^AP:  SSID:/ { split($0, t, /[ :]/); printf "ap_ssid_%s=%s\n", id, t[5] ; next}
+        / KiB in / { printf "stats_in_%s=\"%s\"\n", id, $0 ; next}
+        / KiB out / { printf "stats_out_%s=\"%s\"\n", id, $0 ; next}
+
+        /^GPIO / { printf "gpios_%s=\"${gpios_%s}%s\\\\n\"\n", id, id, $0 ; next}
+        /^\(null\)$/ { next }
+        
+        { printf "Unhandled line \"%s\"\n", $0 >"/dev/stderr"}' 2>>$errs
+
+    # sample full output capture
+    false && send_commands "$id" "
+            show gpio
+        " | awk '
+        BEGIN {
+            id="'$id'"
+            printf "gpios_%s=\"", id 
+        }
+        {
+            gsub(/[\n\r]/,"",$0); 
+        }
+        /^>/ { next }
+        $0=="" { next }
+
+        { printf "%s\\\\n", $0 }
+        
+        END { 
+            printf "\"\n"
+        }' 2>>$errs        
 }
 
 normalize_mac ()
@@ -346,7 +462,7 @@ get_field ()
     local field=$1
     local id=`normalize_mac $2`
 
-    eval "echo \$${field}_$id"
+    eval "echo -n \$${field}_$id"
 }
 
 set_field ()
@@ -412,7 +528,7 @@ read_input ()
         echo -n ": "
         read ANSWER
         [ -z $ANSWER ] && ANSWER=$4
-        _ans=`echo $ANSWER | sed s!"'"!"'\"'\"'"!g`
+        _ans=`echo $ANSWER | sed -e s!"'"!"'\"'\"'"!g`
         eval "case '$_ans' in $2) _ok=true;; *) _ok=false;; esac"
     done
 }
@@ -638,7 +754,7 @@ EOF
     do
         load_conf
 
-        local out=/tmp/out.$$
+        local out=/tmp/out.$$.`random`
         mosquitto_sub -v $MQTT_CREDS -t "/#" > $out 2>&1 &
         sleep 0.1
         if [ ! -s $out ]
@@ -663,7 +779,7 @@ EOF
     done
 
     # check we have configuration for all ESPs
-    local out=/tmp/out.$$
+    local out=/tmp/out.$$.`random`
     mosquitto_sub -v $MQTT_CREDS -t "/#" > $out 2>&1 &
     sleep 0.1
     if [ ! -s $out ]
