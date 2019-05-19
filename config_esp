@@ -128,7 +128,7 @@ display_node ()
     local first_indent=""
     local next_indent=""
 
-    local _node=`echo $node | sed 's/:/_/g'`
+    local _node=`normalize_mac $node`
 
     if [ -z "$lead" ]
     then
@@ -144,7 +144,7 @@ display_node ()
             ROOT_SSID="<unknown>" # not local!
             if [ ! -z $first_son ]
             then
-                local _first_son=`echo $first_son | sed 's/:/_/g'`
+                local _first_son=`normalize_mac $first_son`
                 ROOT_SSID=`show_config $(eval "echo \\\$id_of_$_first_son") | awk -F'[ :]' '/STA: SSID:/ { print $4}'`
             fi
         fi
