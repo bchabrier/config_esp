@@ -21,6 +21,19 @@ ACTIONS_LIST="
     Quit                        : 0                   :
 "
 
+KILLPROCS=""
+KILLFILES=""
+RMFILES=""
+trap '
+    kill $KILLPROCS 2>/dev/null
+    for f in $KILLFILES
+    do
+        [ -s $f ] && kill `cat $f` 2>/dev/null
+    done
+    rm -f $RMFILES
+    exit
+    ' INT
+
 random ()
 {
     bash -c 'echo $RANDOM'
@@ -65,6 +78,9 @@ send_commands ()
     > $tmpfile
     local procs=/tmp/killid.$$.`random`
     > $procs
+    KILLFILES="$KILLFILES $procs"
+    RMFILES="$RMFILES $procs $tmpfile"
+
     { 
         mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS &
         echo $! >> $procs
@@ -240,7 +256,7 @@ display_graph ()
 
     local killprocs=""
     exec 3<&0
-    trap '[ -s $kill_file ] && kill `cat $kill_file` && exit' INT
+    KILLFILES="$KILLFILES $kill_file"
     set -m
 
     # start reading topology info and publishing changes in background
@@ -661,6 +677,7 @@ upload_firmware ()
     cd ~/esp_wifi_repeater/firmware
     python -m SimpleHTTPServer 8080 &
     local proc=$!
+    KILLPROCS="$KILLPROCS $proc"
     sleep 1
     send_commands $1 "
         set ota_host `hostname -I | awk '{print $1}'`
