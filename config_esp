@@ -120,6 +120,16 @@ send_commands ()
     rm -f $tmpfile
 }
 
+DISPLAY_FORMATS="
+    summary
+    show config
+    show gpio
+    show stats
+    show dhcp
+    show route
+    show acl
+"
+
 display_node ()
 {
     local node=$1
@@ -129,27 +139,15 @@ display_node ()
     local first_indent=""
     local next_indent=""
 
-    local _node=`normalize_mac $node`
-
     if [ -z "$lead" ]
     then
         # root node
 
-        local depts
-        eval "depts=\$dependents_$_node"
+        local first_son=`get_field dependents $node | awk '{print $1}'`
+        local first_son_id=`get_field id_of $first_son`
 
-        local first_son=`echo $depts | awk '{print $1}'`
-
-        if [ -z $ROOT_SSID ]
-        then
-            ROOT_SSID="<unknown>" # not local!
-            if [ ! -z $first_son ]
-            then
-                local _first_son=`normalize_mac $first_son`
-                ROOT_SSID=`show_config $(eval "echo \\\$id_of_$_first_son") | awk -F'[ :]' '/STA: SSID:/ { print $4}'`
-            fi
-        fi
-        echo SSID: $ROOT_SSID
+        local root_ssid="`get_field sta_ssid $first_son_id`"
+        echo SSID: $root_ssid
         echo $node
 
     else
@@ -157,21 +155,33 @@ display_node ()
         first_indent="$indent+--"
         next_indent="$indent   "
 
+        local id=`get_field id_of $node`
 
-        local _node=`echo $node | sed 's/:/_/g'`
-        local id
-        eval "id=\$id_of_$_node"
-
-        local rssi=$(eval "echo \$rssi_$id")
+        local rssi=`get_field rssi $id`
 
         (
             echo ESP_$id: `get_description $id` 
             case "$format" in 
-            'g')
+            'show gpio')
                 get_field gpios $id
                 ;;
-            'f'|*)
-                echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id` 
+            'show config')
+                get_field show_config $id
+                ;;
+            'show stats')
+                get_field show_stats $id
+                ;;
+            'show dhcp')
+                get_field show_dhcp $id
+                ;;
+            'show route')
+                get_field show_route $id
+                ;;
+            'show acl')
+                get_field show_acl $id
+                ;;
+            'summary'|*)
+                echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id` `get_field sta_ssid $id`
                 get_field version $id; echo
                 local uptime="`get_field system_uptime $id | awk -F: '{
                         days=int($1/24)
@@ -247,7 +257,7 @@ display_graph ()
     local keys_file=/tmp/keys.$$.`random`
     > $keys_file
     local format_file=/tmp/format.$$.`random`
-    > $format_file
+    echo "$DISPLAY_FORMATS" | awk '$0 !~ /^ *$/ { gsub(/^ */, ""); print; exit }' >> $format_file
     local changes_file=/tmp/changes.$$.`random`
     > $changes_file
     local kill_file=/tmp/kill.$$.`random`
@@ -310,6 +320,8 @@ display_graph ()
         local scrfile=/tmp/scr.$$.`random`
         {
             clear
+            local format="`tail -1 $format_file`"
+            echo "Display: $format"
             #echo $nodes
             #echo $macs
             #echo roots=$roots
@@ -327,7 +339,7 @@ display_graph ()
 
             for r in $roots
             do
-                display_sub_graph $r "" "`tail -1 $format_file`"
+                display_sub_graph $r "" "$format"
             done
 
             mv $errs $errs.done
@@ -335,22 +347,42 @@ display_graph ()
             cat $errs.done
             rm -f $errs.done
         } > $scrfile 2>&1
-        [ "`cat $keys_file`" != 'q' ] && cat $scrfile
+        local f="`tail -1 $format_file 2>/dev/null`"
+        if [ "$f" != 'quitting' -a "$f" != "" ]
+        then
+            cat $scrfile
+            echo
+            echo -n "Press a key to rotate display, 'q' to quit: "
+        fi
         rm -f $scrfile
-        echo
-        echo -n 'Choose format: full|gpios or quit (f|g|q): '
     done &
 
     # read stdin for key pressed
-    bash -c 'read -rsn 1 -p "Discovering topology, press '"'q'"' to quit..." key; echo $key' <&3 >$keys_file
-    local key=`cat $keys_file`
+    echo -n "Discovering topology, press '"'q'"' to quit..." 
+    local key=''
     while [ "$key" != 'q' ]
     do  
-        echo $key >> $format_file
-        # provoque a refresh
-        echo >> $changes_file
         bash -c 'read -rsn 1 key; echo $key' <&3 >$keys_file
         key=`cat $keys_file`
+
+        if [ "$key" != 'q' ]
+        then
+            # find next format
+            local format="`tail -1 $format_file`"
+            { 
+                echo "$DISPLAY_FORMATS"
+                echo "$DISPLAY_FORMATS" # to rotate
+            } | awk '
+            BEGIN { found=0 }
+            $0 ~ /^ *$/ { next }
+            $0 ~ /^ *'"$format"' *$/ { found=1; next }
+            found == 0 { next }
+            found == 1 { gsub(/^ */, ""); print; exit}' >> $format_file
+            # provoque a refresh
+            echo >> $changes_file
+        else
+            echo 'quitting' >> $format_file
+        fi
     done
     echo
     set +m # disable the [1] Terminated message when killing the background process
@@ -421,7 +453,6 @@ collect_node_info ()
         /^>/ { next }
         $0=="" { next }
         /Stations? connected/ { next }
-        /^STA: SSID:/ { next }
         /^BSSID: / { next }
         /^STA MAC: / { next }
         /^STA IP: / { next }
@@ -439,7 +470,8 @@ collect_node_info ()
         /^Power supply:/ { printf "power_supply_%s=%s\n", id, $3 ; next}
         /^Free mem:/ { printf "free_mem_%s=%s\n", id, $3 ; next}
         /^Clock speed:/ { printf "clock_speed_%s=%s\n", id, $3 ; next}
-        /^AP:  SSID:/ { split($0, t, /[ :]/); printf "ap_ssid_%s=%s\n", id, t[5] ; next}
+        /^AP:  SSID:/ { split($0, t, /[ :]+/); printf "ap_ssid_%s=%s\n", id, t[3] ; next}
+        /^STA: SSID:/ { split($0, t, /[ :]+/); printf "sta_ssid_%s=%s\n", id, t[3] ; next}
         / KiB in / { printf "stats_in_%s=\"%s\"\n", id, $0 ; next}
         / KiB out / { printf "stats_out_%s=\"%s\"\n", id, $0 ; next}
 
@@ -448,13 +480,23 @@ collect_node_info ()
         
         { printf "Unhandled line \"%s\"\n", $0 >"/dev/stderr"}' 2>>$errs
 
-    # sample full output capture
-    false && send_commands "$id" "
-            show gpio
-        " | awk '
+    capture_command_output "$id" "show config" "show_config" 2>>$errs        
+    capture_command_output "$id" "show stats" "show_stats" 2>>$errs        
+    capture_command_output "$id" "show dhcp" "show_dhcp" 2>>$errs        
+    capture_command_output "$id" "show route" "show_route" 2>>$errs        
+    capture_command_output "$id" "show acl" "show_acl" 2>>$errs        
+}
+
+capture_command_output ()
+{
+    local id="$1"
+    local command="$2"
+    local field="$3"
+
+    send_commands "$id" "$command" | awk '
         BEGIN {
             id="'$id'"
-            printf "gpios_%s=\"", id 
+            printf "'$field'_%s=\"", id 
         }
         {
             gsub(/[\n\r]/,"",$0); 
@@ -466,7 +508,7 @@ collect_node_info ()
         
         END { 
             printf "\"\n"
-        }' 2>>$errs        
+        }'
 }
 
 normalize_mac ()
