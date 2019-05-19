@@ -679,14 +679,33 @@ upload_firmware ()
     local proc=$!
     KILLPROCS="$KILLPROCS $proc"
     sleep 1
+    local nbcols=`tput cols`
     send_commands $1 "
         set ota_host `hostname -I | awk '{print $1}'`
         set ota_port 8080
         ota update
-    " 1
+    " 1 | awk '
+    /^Binary length:/ { size=$3 }
+    /^\(null\)$/ { next }
+    $2 == "KB" { 
+        pct=($1*1024)/size*100
+        p=('$nbcols' - 3 - 1 - 1) * pct / 100
+        printf "%3d%% ", pct
+        for (i=0; i<p; i++) printf "="
+        printf ">\r"
+        next
+    }
+    { print }
+    END { 
+        for (i=0; i<'$nbcols'; i++) printf " "
+        printf "\n"
+    }
+    '
     kill $proc
+    echo -n 'Waiting for ESP to reboot...'
     sleep 10
-    send_commands $1 "show config"
+    echo
+    send_commands $1 "show config" | grep -E '^Version' 
 }
 
 enter_command_line ()
