@@ -569,7 +569,7 @@ select_ESPs ()
 execute_action ()
 {
     local c=`get_action_cardinality $ACTION`
-    case $c in 
+    [ -z "$ESPs" ] && case $c in 
     "n")
         select_ESPs -all
         ;;
@@ -594,6 +594,7 @@ execute_action ()
     else
         $ACTION
     fi
+    ESPs=""
 }
 
 quit ()
@@ -847,17 +848,12 @@ fi
 
 check_conf
 
-if [ "$1" = "-display_graph" ]
-then
-    display_graph
-    exit 0
-fi
-
+ESPs=""
 ACTION=""
 if [ $# = 2 ]
 then
-    ESPs=$1
-    ACTION=$2
+    ESPs=$2
+    ACTION=$1
 fi
 
 if [ $# = 1 ]
