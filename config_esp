@@ -31,6 +31,7 @@ trap '
         [ -s $f ] && kill `cat $f` 2>/dev/null
     done
     rm -f $RMFILES
+    echo
     exit
     ' INT
 
@@ -631,7 +632,7 @@ get_action_cardinality ()
 
 usage ()
 {
-    echo "Usage: `basename $0` [<action> [ESP]]" >&2
+    echo "Usage: `basename $0` [<action> [ESP]|all]" >&2
     echo "Supported ESPs:" >&2
     for esp in `get_ESPs`
     do
@@ -889,12 +890,12 @@ ACTION=""
 if [ $# = 2 ]
 then
     ESPs=$2
+    [ $ESPs = "all" ] && ESPs=`get_ESPs`
     ACTION=$1
 fi
 
 if [ $# = 1 ]
 then
-    ESPs=`get_ESPs`
     ACTION=$1
 fi
 
