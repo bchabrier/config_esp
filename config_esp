@@ -281,7 +281,11 @@ display_graph ()
         wait
     } | while read line
     do
-        collect_node_info "$line" | tr '\n' ';' >> $changes_file 2>> $errs
+        ( 
+            collect_node_info "$line" &
+            echo $! >> $kill_file
+            wait
+        ) | tr '\n' ';' >> $changes_file 2>> $errs
         echo >> $changes_file
     done &
 
@@ -389,9 +393,9 @@ display_graph ()
         fi
     done
     echo
-    set +m # disable the [1] Terminated message when killing the background process
-    [ -s $kill_file ] && kill `cat $kill_file`
     exec 3<&-
+    set +m # disable the [1] Terminated message when killing the background process
+    [ -s $kill_file ] && kill `cat $kill_file` 2>/dev/null
     rm -f $keys_file
     rm -f $format_file
     rm -f $changes_file
