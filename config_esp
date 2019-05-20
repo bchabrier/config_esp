@@ -125,6 +125,7 @@ DISPLAY_FORMATS="
     show config
     show gpio
     show stats
+    show mqtt
     show dhcp
     show route
     show acl
@@ -173,6 +174,9 @@ display_node ()
                 ;;
             'show dhcp')
                 get_field show_dhcp $id
+                ;;
+            'show mqtt')
+                get_field show_mqtt $id
                 ;;
             'show route')
                 get_field show_route $id
@@ -482,6 +486,7 @@ collect_node_info ()
 
     capture_command_output "$id" "show config" "show_config" 2>>$errs        
     capture_command_output "$id" "show stats" "show_stats" 2>>$errs        
+    capture_command_output "$id" "show mqtt" "show_mqtt" 2>>$errs        
     capture_command_output "$id" "show dhcp" "show_dhcp" 2>>$errs        
     capture_command_output "$id" "show route" "show_route" 2>>$errs        
     capture_command_output "$id" "show acl" "show_acl" 2>>$errs        
