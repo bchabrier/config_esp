@@ -450,7 +450,7 @@ collect_node_info ()
             show config
             show stats
             show gpio
-        " | awk '
+        " 0.1 | awk '
         BEGIN {
             id="'$id'"
             printf "gpios_%s=\"\"\n", id 
@@ -502,7 +502,7 @@ capture_command_output ()
     local command="$2"
     local field="$3"
 
-    send_commands "$id" "$command" | awk '
+    send_commands "$id" "$command" 0.1 | awk '
         BEGIN {
             id="'$id'"
             printf "'$field'_%s=\"", id 
