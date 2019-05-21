@@ -722,11 +722,33 @@ show_gpio_config ()
     send_commands $1 "show gpio"
 }
 
+find_firmware_dir ()
+{
+    if [ -z "$FIRMWAREDIR" ]
+    then
+        echo "$firmware_lines" >> $CONFFILE
+        load_conf
+    fi
+
+    if [ ! -f "$FIRMWAREDIR/sha1sums" ] || ! ls $FIRMWAREDIR/*.bin > /dev/null 2>&1
+    then
+        ANSWER=y
+        while [ $ANSWER = y ]
+        do
+            ls $FIRMWAREDIR/*.bin $FIRMWAREDIR/sha1sums
+            echo "No firmware file found in '$FIRMWAREDIR'!"
+            read_input 'Do you want to check the configuration file?' 'y|Y|n|N' 'y|n' y
+            [ $ANSWER = y ] && sensible-editor $CONFFILE && load_conf
+        done
+    fi
+}
+
 upload_firmware () 
 {
     # $1: esp
 
-    cd ~/esp_wifi_repeater/firmware
+    find_firmware_dir
+    cd $FIRMWAREDIR
     python -m SimpleHTTPServer 8080 &
     local proc=$!
     KILLPROCS="$KILLPROCS $proc"
@@ -754,7 +776,7 @@ upload_firmware ()
     }
     '
     kill $proc
-    echo -n 'Waiting for ESP to reboot...'
+    echo -n "Waiting for ESP_$1 (`get_description $1`) to reboot..."
     sleep 10
     echo
     send_commands $1 "show config" | grep -E '^Version' 
@@ -803,6 +825,11 @@ select_action ()
     fi
 }
 
+firmware_lines='
+# Repository where to find firmware
+FIRMWAREDIR=~/esp_wifi_repeater/firmware
+'
+
 check_conf ()
 {
     CONFFILE=~/.config_esp.conf
@@ -826,6 +853,7 @@ D8=15
 MQTT_HOST=
 MQTT_USER=
 MQTT_PASSWORD=
+$firmware_lines
 EOF
         chmod u=rw,og= $CONFFILE
     fi
