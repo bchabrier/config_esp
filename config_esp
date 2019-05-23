@@ -90,9 +90,17 @@ send_commands ()
     (
         if $interactive
         then
+            local histfile="$HOME/.config_esp_history"
+            >> $histfile
+            chmod u=rw,og-rwx $histfile
+            local histsize=${HISTSIZE:-500}
             local command=""
-            while read -p "CMD> " command && [ ! "$command" = "quit" ]
+            while command=$(bash -ci "HISTFILE=$histfile; set -o history; read -e -p 'CMD> ' command && echo \$command") && [ ! "$command" = "quit" ]  
             do
+                > $histfile.tmp
+                chmod u=rw,og-rwx $histfile.tmp
+                ( cat $histfile; echo $command ) | uniq | tail -$histsize >> $histfile.tmp
+                mv $histfile.tmp $histfile
                 echo $command
                 wait_file $tmpfile 0.1
             done
