@@ -760,33 +760,57 @@ upload_firmware ()
     python -m SimpleHTTPServer 8080 &
     local proc=$!
     KILLPROCS="$KILLPROCS $proc"
+    local procs=/tmp/killid.$$.`random`
+    > $procs
+    KILLFILES="$KILLFILES $procs"
+    RMFILES="$RMFILES $procs"
     sleep 1
     local nbcols=`tput cols`
-    send_commands $1 "
-        set ota_host `hostname -I | awk '{print $1}'`
-        set ota_port 8080
-        ota update
-    " 1 | awk '
-    /^Binary length:/ { size=$3 }
-    /^\(null\)$/ { next }
-    $2 == "KB" { 
-        pct=($1*1024)/size*100
-        p=('$nbcols' - 3 - 1 - 1) * pct / 100
-        printf "%3d%% ", pct
-        for (i=0; i<p; i++) printf "="
-        printf ">\r"
-        next
-    }
-    { print }
-    END { 
-        for (i=0; i<'$nbcols'; i++) printf " "
-        printf "\n"
-    }
-    '
+    (
+        mosquitto_sub -t /WiFi/ESPRouter_$1/system/status $MQTT_CREDS &
+        echo $! >> $procs
+        send_commands $1 "
+            set ota_host `hostname -I | awk '{print $1}'`
+            set ota_port 8080
+            ota update
+        " 10 &
+        echo $! >> $procs
+        wait %2
+        [ -s $procs ] && kill `cat $procs` 2> /dev/null
+    ) | (
+        awk '
+            /^Binary length:/ { size=$3 }
+            /^\(null\)$/ { next }
+            $2 == "KB" { 
+                pct=($1*1024)/size*100
+                p=('$nbcols' - 3 - 1 - 1) * pct / 100
+                printf "%3d%% ", pct
+                for (i=0; i<p; i++) printf "="
+                printf ">\r"
+                next
+            }
+            /^online$/ {
+                # should get 2 lines like this
+                rebooted=rebooted+1
+                if (rebooted==2) exit
+                next
+            }
+            { print }
+            END { 
+                for (i=0; i<'$nbcols'; i++) printf " "
+                printf "\n"
+                if (rebooted==2) {
+                    print "Successfully rebooted!"
+                } else {
+                    print "Update failed..."
+                }
+            }
+        '
+        [ -s $procs ] && kill `cat $procs` 2> /dev/null
+    )
     kill $proc
-    echo -n "Waiting for ESP_$1 (`get_description $1`) to reboot..."
-    sleep 10
-    echo
+    [ -s $procs ] && kill `cat $procs` 2> /dev/null
+    rm -f $procs
     send_commands $1 "show config" | grep -E '^Version' 
 }
 
