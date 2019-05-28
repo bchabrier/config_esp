@@ -24,7 +24,9 @@ ACTIONS_LIST="
 KILLPROCS=""
 KILLFILES=""
 RMFILES=""
-trap '
+
+cleanup ()
+{
     kill $KILLPROCS 2>/dev/null
     for f in $KILLFILES
     do
@@ -32,6 +34,10 @@ trap '
     done
     rm -f $RMFILES
     echo
+}
+
+trap '
+    cleanup
     exit
     ' INT
 
@@ -75,17 +81,23 @@ send_commands ()
     local timeout=$3
     [ -z $timeout ] && timeout=1
 
-    tmpfile=/tmp/resp.$$.`random`
+    local tmpfile=/tmp/resp.$$.`random`
     > $tmpfile
     local procs=/tmp/killid.$$.`random`
     > $procs
     KILLFILES="$KILLFILES $procs"
     RMFILES="$RMFILES $procs $tmpfile"
 
+    trap '
+        kill `cat $procs` 2>/dev/null
+        rm -f $procs
+        rm -f $tmpfile
+        exit' TERM
+
     { 
         mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS &
         echo $! >> $procs
-        wait
+        wait %%
     } | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | tee -a $tmpfile &
     (
         if $interactive
@@ -121,9 +133,11 @@ send_commands ()
     done
     if ! $interactive
     then
-        wait_file $tmpfile $timeout
+        wait_file $tmpfile $timeout &
+        echo $! >> $procs
+        wait %%
     fi
-    [ -s $procs ] && kill `cat $procs`
+    kill `cat $procs` 2>/dev/null
     rm -f $procs
     rm -f $tmpfile
 }
@@ -193,7 +207,7 @@ display_node ()
                 get_field show_acl $id
                 ;;
             'summary'|*)
-                echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id` `get_field sta_ssid $id`
+                echo AP SSID: `get_field ap_ssid $id` - $node - `get_field sta_ip $id`
                 get_field version $id; echo
                 local uptime="`get_field system_uptime $id | awk -F: '{
                         days=int($1/24)
@@ -760,24 +774,24 @@ upload_firmware ()
     python -m SimpleHTTPServer 8080 &
     local proc=$!
     KILLPROCS="$KILLPROCS $proc"
-    local procs=/tmp/killid.$$.`random`
+    local procs=/tmp/killfirm.$$.`random`
     > $procs
     KILLFILES="$KILLFILES $procs"
     RMFILES="$RMFILES $procs"
     sleep 1
     local nbcols=`tput cols`
-    (
+    {
         mosquitto_sub -t /WiFi/ESPRouter_$1/system/status $MQTT_CREDS &
         echo $! >> $procs
         send_commands $1 "
             set ota_host `hostname -I | awk '{print $1}'`
             set ota_port 8080
             ota update
-        " 10 &
+        " 60 &
         echo $! >> $procs
-        wait %2
-        [ -s $procs ] && kill `cat $procs` 2> /dev/null
-    ) | (
+        wait %%
+        kill `cat $procs` 2> /dev/null
+     } | {
         awk '
             /^Binary length:/ { size=$3 }
             /^\(null\)$/ { next }
@@ -806,10 +820,10 @@ upload_firmware ()
                 }
             }
         '
-        [ -s $procs ] && kill `cat $procs` 2> /dev/null
-    )
+        kill `cat $procs` 2> /dev/null
+     }
     kill $proc
-    [ -s $procs ] && kill `cat $procs` 2> /dev/null
+    kill `cat $procs` 2> /dev/null
     rm -f $procs
     send_commands $1 "show config" | grep -E '^Version' 
 }
@@ -1031,5 +1045,5 @@ else
     execute_action
 fi
 
-
+cleanup
 
