@@ -40,7 +40,7 @@ ESP_04a92c - Wemos D1 Mini du garage
 ------------------------------------
 > show config
 Version V2.2.9 (build: Sun May 12 11:26:38 2019)
-STA: SSID:Wifi_Home PW:lamerestbleue
+STA: SSID:Wifi_Home PW:XXXXXXXXX
 BSSID: 24:24:01:2c:49:77
 Automesh: on (operational) Level: 2 Threshold: -85
 AP:  SSID:Wifi_Home_ESP  PW:XXXXXXXXX IP:10.24.2.1/24 [NAT]
