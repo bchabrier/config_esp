@@ -98,7 +98,17 @@ send_commands ()
         mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS &
         echo $! >> $procs
         wait %%
-    } | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | tee -a $tmpfile &
+    } | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | while read ll
+        do
+            case "$ll" in 
+            'Config locked (pw: '*)
+                echo 'Config locked (pw: ***)'
+                ;;
+            *)
+                echo "$ll"
+                ;;
+            esac
+        done  | tee -a $tmpfile &
     (
         if $interactive
         then
@@ -112,8 +122,8 @@ send_commands ()
                 > $histfile.tmp
                 chmod u=rw,og-rwx $histfile.tmp
                 ( cat $histfile; echo $command ) | uniq | tail -$histsize >> $histfile.tmp
-                mv $histfile.tmp $histfile
-                echo $command
+                mv $histfile.tmp $
+                echo "$command"
                 wait_file $tmpfile 0.1
             done
         else
@@ -125,7 +135,17 @@ send_commands ()
         case "$l" in
         "#"*|"") ;;
         *)
-            $interactive || echo ">" $l
+            $interactive || (
+                echo -n "> " 
+                case "$l" in
+                'unlock '*)
+                    echo 'unlock ***'
+                    ;;
+                *)
+                    echo $l
+                    ;;
+                esac
+            )
             mosquitto_pub -t /WiFi/ESPRouter_$1/command $MQTT_CREDS -m "$l"
             sleep 0.1
             ;;
