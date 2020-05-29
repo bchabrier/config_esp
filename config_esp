@@ -1066,7 +1066,7 @@ fi
 
 if [ ! -z $ACTION ]
 then
-    if [ -z `get_actions | grep -- "$ACTION"` ]
+    if [ -z `get_actions | grep -w -- "$ACTION"` ]
     then
         usage
         exit 2
