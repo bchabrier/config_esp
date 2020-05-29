@@ -724,27 +724,30 @@ upload_config ()
 {
     # $1: esp
 
-    local trapfile=/tmp/trap.$$.`random`
-    RMFILES="$RMFILES $trapfile"
+    if [ -z $STA_PASSWORD ] 
+    then
+        local trapfile=/tmp/trap.$$.`random`
+        RMFILES="$RMFILES $trapfile"
 
-    trap > $trapfile # cannot pipe as trap will reset all signals in subshell
-    prev_trap=$(cat $trapfile | grep -E 'INT$' | sed -e "s/^trap -- '//" | sed -e "s/' INT//" | sed -e "s/' SIGINT//")
-    rm -f $trapfile
-    trap "stty echo
-        $prev_trap
-        exit" INT
-    stty -echo
-    echo -n "Password:"
-    read password
-    stty echo
-    trap "$prev_trap" INT
+        trap > $trapfile # cannot pipe as trap will reset all signals in subshell
+        prev_trap=$(cat $trapfile | grep -E 'INT$' | sed -e "s/^trap -- '//" | sed -e "s/' INT//" | sed -e "s/' SIGINT//")
+        rm -f $trapfile
+        trap "stty echo
+            $prev_trap
+            exit" INT
+        stty -echo
+        echo -n "Password:"
+        read STA_PASSWORD
+        echo
+        stty echo
+        trap "$prev_trap" INT
+    fi
     send_commands $1 "
-        unlock $password
+        unlock $STA_PASSWORD
         $(get_commands $1)
         save
         lock
     "
-    password=
 }
 
 show_config () 
