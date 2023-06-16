@@ -67,6 +67,41 @@ wait_file ()
     done
 }
 
+replace_Dis ()
+{
+    local str="$1"
+
+    # replace the Di by their values
+    sed_command="sed -E"
+    for D in D0 D1 D2 D3 D4 D5 D6 D7 D8
+    do
+        eval Dval=\$$D
+        str=`echo $str | sed -E -e "s/ $D / $Dval /g"`
+    done
+
+    echo $str
+}
+
+sed_command=""
+replace_Di_vals ()
+{
+    local str="$1"
+
+    if [ "$sec_command" = "" ]
+    then
+        # replace the Di by their values
+        sed_command="sed -E"
+        for D in D0 D1 D2 D3 D4 D5 D6 D7 D8
+        do
+            sed_command="$sed_command -e 's/ '\$$D'([ :])/ $D('\$$D')\1/g'"
+        done
+    fi
+
+    echo $str | eval "$sed_command"
+}
+
+
+
 send_commands ()
 {
     local interactive=false
@@ -103,6 +138,14 @@ send_commands ()
             case "$ll" in 
             'Config locked (pw: '*)
                 echo 'Config locked (pw: ***)'
+                ;;
+            'GPIO '*|'Successfully executed'*)
+                # replace the Di values by Di (Dival)
+                replace_Di_vals "$ll"
+                ;;
+            'gpio [0-16]'*)
+                # help output
+                echo "$ll" | sed -e 's/\[0-16\]/D[0-8]|[0-16]/g'
                 ;;
             *)
                 echo "$ll"
@@ -146,6 +189,24 @@ send_commands ()
                     ;;
                 esac
             )
+            case "$l" in
+                'gpio '*)
+                    # check that second word is a Di or number
+                    local word2=$(echo "$l" | awk '{print $2}')
+                    case "$word2" in
+                        [0-9]|[0-9][0-9]|D[0-9]) 
+                            ;;
+                        *) 
+                            l=999999 # force error generation
+                            ;;
+                        esac
+                    # replace the Di by their values
+                    l=`replace_Dis "$l"`
+                    ;; 
+                *)
+                    ;;
+                esac
+
             mosquitto_pub -t /WiFi/ESPRouter_$1/command $MQTT_CREDS -m "$l"
             sleep 0.1
             ;;
@@ -1009,7 +1070,7 @@ EOF
             new_conf="`cat <<EOF
 config_$e="Description of ESP_$e
     # configuration of ESP_$e
-    # set gpio \\$D1 mode out
+    # set gpio D1 mode out
 "
 EOF
             `""\n\n"$new_conf
