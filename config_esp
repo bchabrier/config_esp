@@ -588,6 +588,8 @@ get_config ()
 {
     # $1: esp
 
+    load_conf # make sure to get the latest config
+
     eval 'echo "$config_'$1'"'
 }
 
