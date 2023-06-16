@@ -1006,19 +1006,19 @@ EOF
         then
             # ESP e is not known, let's add an initial config for it
             added_esps="$added_esps ESP_$e"
-            new_conf=`cat <<EOF
-config_$e="Description of ESP_$e\n
-    # configuration of ESP_$e\n
-    # set gpio \\$D1 mode out\n
+            new_conf="`cat <<EOF
+config_$e="Description of ESP_$e
+    # configuration of ESP_$e
+    # set gpio \\$D1 mode out
 "
 EOF
-            `"\n\n"$new_conf
+            `""\n\n"$new_conf
         fi
     done
     if [ ! -z "$new_conf" ]
     then
         # sed hacks below found on https://unix.stackexchange.com/questions/26284/how-can-i-use-sed-to-replace-a-multi-line-string
-        new_conf=`echo $new_conf | sed -e '1h;2,$H;$!d;g' -re 's/\n/\\\n/g'`
+        new_conf=`echo "$new_conf" | sed -e '1h;2,$H;$!d;g' -re 's/\n/\\\n/g'`
         sed -i.old -e '1h;2,$H;$!d;g' -re "s/(\n *\n(.*[^ ].*\n)*MQTT_)/\n\n$new_conf\\1/g" $CONFFILE
         echo "A new default configuration has been added for$added_esps."
         read_input 'Do you want to edit the configuration file' 'y|Y|n|N' 'y|n' y
