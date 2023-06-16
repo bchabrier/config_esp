@@ -122,7 +122,7 @@ send_commands ()
                 > $histfile.tmp
                 chmod u=rw,og-rwx $histfile.tmp
                 ( cat $histfile; echo $command ) | uniq | tail -$histsize >> $histfile.tmp
-                mv $histfile.tmp $
+                mv $histfile.tmp $histfile
                 echo "$command"
                 wait_file $tmpfile 0.1
             done
