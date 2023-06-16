@@ -74,7 +74,7 @@ send_commands ()
     then
         interactive=true
         shift
-        echo "Entering in command line mode with ESP_$1. Type 'quit' to end the session..."
+        echo "Entering in command line mode with ESP_$1 - `get_description $1`. Type 'quit' to end the session..."
     fi
     # $1: esp
     # $2: list of commands
