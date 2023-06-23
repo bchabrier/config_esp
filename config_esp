@@ -15,6 +15,7 @@ ACTIONS_LIST="
     Show GPIO config            : n                   : 
     Upload config               : n                   :
     Upload firmware             : n                   :
+    Track GPIO activity         : 1                   :Show gpio activity from MQTT
     Enter command line          : 1                   :Communicates with the ESP
     Display graph               : 0                   :Display topology 
     Edit config file            : 0                   :
@@ -93,7 +94,7 @@ replace_Di_vals ()
         sed_command="sed -E"
         for D in D0 D1 D2 D3 D4 D5 D6 D7 D8
         do
-            sed_command="$sed_command -e 's/ '\$$D'([ :])/ $D('\$$D')\1/g'"
+            sed_command="$sed_command -e 's!([ /])'\$$D'([ :])!\1$D('\$$D')\2!g'"
         done
     fi
 
@@ -105,12 +106,25 @@ replace_Di_vals ()
 send_commands ()
 {
     local interactive=false
-    if [ "$1" = -i ]
-    then
-        interactive=true
-        shift
-        echo "Entering in command line mode with ESP_$1 - `get_description $1`. Type 'quit' to end the session..."
-    fi
+    local log_activity=false
+    local mqtt_thread=""
+    case "$1" in
+        -i) 
+            interactive=true
+            shift
+            echo "Entering in command line mode with ESP_$1 - `get_description $1`. Type 'quit' to end the session..."
+            mqtt_thread="/WiFi/ESPRouter_$1/system/response"
+            ;;
+        -l)
+            log_activity=true
+            shift
+            echo "Logging GPIO activity of ESP_$1 - `get_description $1`. Type 'q' to quit..."
+            mqtt_thread="/WiFi/ESPRouter_$1/system/Gpio/#"
+            ;;
+        *)
+            mqtt_thread="/WiFi/ESPRouter_$1/system/response"
+            ;;
+    esac
     # $1: esp
     # $2: list of commands
     local timeout=$3
@@ -130,16 +144,16 @@ send_commands ()
         exit' TERM
 
     { 
-        mosquitto_sub -v -t "/WiFi/ESPRouter_$1/system/response" $MQTT_CREDS &
+        mosquitto_sub -v -t $mqtt_thread $MQTT_CREDS &
         echo $! >> $procs
         wait %%
-    } | sed -u -e "s!^/WiFi/ESPRouter_$1/system/response !!g" | while read ll
+    } | sed -u -e "s!^$mqtt_thread !!g" | while read ll
         do
             case "$ll" in 
             'Config locked (pw: '*)
                 echo 'Config locked (pw: ***)'
                 ;;
-            'GPIO '*|'Successfully executed'*)
+            'GPIO '*|'Successfully executed'*|"/WiFi/ESPRouter_$1/system/Gpio/"*)
                 # replace the Di values by Di (Dival)
                 replace_Di_vals "$ll"
                 ;;
@@ -212,7 +226,17 @@ send_commands ()
             ;;
         esac
     done
-    if ! $interactive
+    local keys_file=/tmp/keys.$$.`random`
+    if $log_activity
+    then
+        local key=''
+        while [ "$key" != 'q' ]
+        do
+            bash -c 'read -rn 1 key; echo $key' >$keys_file
+            key=`cat $keys_file`
+        done
+    fi
+    if ! $interactive && ! $log_activity
     then
         wait_file $tmpfile $timeout &
         echo $! >> $procs
@@ -221,6 +245,7 @@ send_commands ()
     kill `cat $procs` 2>/dev/null
     rm -f $procs
     rm -f $tmpfile
+    rm -f $keys_file
 }
 
 DISPLAY_FORMATS="
@@ -929,6 +954,11 @@ upload_firmware ()
     kill `cat $procs` 2> /dev/null
     rm -f $procs
     send_commands $1 "show config" | grep -E '^Version' 
+}
+
+track_gpio_activity ()
+{
+    send_commands -l $1
 }
 
 enter_command_line ()
