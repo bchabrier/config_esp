@@ -1070,7 +1070,8 @@ EOF
             new_conf="`cat <<EOF
 config_$e="Description of ESP_$e
     # configuration of ESP_$e
-    # set gpio D1 mode out
+    # for instance:
+    # gpio D1 mode out
 "
 EOF
             `""\n\n"$new_conf
